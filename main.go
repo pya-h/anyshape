@@ -24,7 +24,7 @@ func combine(word string, start int, k int, path []rune, results *[]string) {
 	}
 }
 
-func generateCombinations(input string) []string {
+func generateCombinations(input string, excludingCombos Set) []string {
 	input = strings.ToLower(input)
 	first := input[0]
 	rest := input[1:]
@@ -56,6 +56,11 @@ func (s Set) Add(item string) bool {
 		return true
 	}
 	return false
+}
+
+func (s Set) Includes(item string) bool {
+	_, exists := s[item]
+	return exists
 }
 
 func NewSet() Set {
@@ -143,9 +148,9 @@ func searchWordByWord(rootAddress string, searchChannel chan SearchChannelData, 
 	}
 }
 
-func lookForMatches(rootAddress string, word string, searchChannel chan SearchChannelData) []string {
+func lookForMatches(rootAddress string, searchChannel chan SearchChannelData, combos []string) []string {
 	failedCombos := make([]string, 0)
-	for _, combo := range generateCombinations(word) {
+	for _, combo := range combos {
 		log.Println("Searching for combo:", combo, "...")
 		if err := filepath.Walk(rootAddress, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -188,14 +193,18 @@ func main() {
 	word := os.Args[2]
 	workerLimit := 300
 	wordByWordSearch := false
-
-	if len(os.Args) > 3 {
-		for arg := 3; arg < len(os.Args); arg++ {
+	excludingCombos := make(Set)
+	if argsCount := len(os.Args); argsCount > 3 {
+		for arg := 3; arg < argsCount; arg++ {
 			if limit, err := strconv.Atoi(os.Args[arg]); err == nil && limit > 0 {
 				workerLimit = limit
 			} else if os.Args[arg] == "-w" {
 				log.Println("Word by word search enabled")
 				wordByWordSearch = true
+			} else if os.Args[arg] == "-x" {
+				for ; arg < argsCount && !strings.HasPrefix(os.Args[arg], "-"); arg++ {
+					excludingCombos.Add(strings.ToLower(os.Args[arg]))
+				}
 			} else {
 				log.Fatalln("Unknown argument:", os.Args[arg])
 			}
@@ -214,9 +223,8 @@ func main() {
 			go search(root, searchChannel, writerChannel)
 		}
 	}
-
-	if failedCombos := lookForMatches(root, word, searchChannel); len(failedCombos) > 0 {
-
+	combinations := generateCombinations(word, excludingCombos)
+	if failedCombos := lookForMatches(root, searchChannel, combinations); len(failedCombos) > 0 {
 		writerChannel <- WriterChannelData{Output: fmt.Sprintln("\n- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - \nCombo's failed Matching:", len(failedCombos)), Ident: ""}
 		for _, combo := range failedCombos {
 			writerChannel <- WriterChannelData{Output: fmt.Sprintf("Failed to search for combo: %s", combo), Ident: ""}
