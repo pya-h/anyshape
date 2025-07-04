@@ -204,7 +204,7 @@ func main() {
 				log.Println("Word by word search enabled")
 				wordByWordSearch = true
 			} else if os.Args[arg] == "-x" {
-				for ; arg < argsCount && !strings.HasPrefix(os.Args[arg], "-"); arg++ {
+				for arg++; arg < argsCount && !strings.HasPrefix(os.Args[arg], "-"); arg++ {
 					excludingCombos.Add(strings.ToLower(os.Args[arg]))
 				}
 			} else {
