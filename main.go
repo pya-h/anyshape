@@ -8,12 +8,22 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	goset "github.com/pydea-rs/goset"
 )
 
-func combine(word string, start int, k int, path []rune, results *[]string, excludingCombos Set) {
+var separatorSigns = goset.New(
+	'~', '!', '@', '#', '$', '%', '^', '&',
+	'*', '(', ')', '+', ',', '.', '/', ';',
+	'\'', '"', ' ', '\t', '\n', '\r', '\\',
+	'|', '{', '}', '[', ']', '<', '>',
+	'?', '=', ':', '`',
+)
+
+func combine(word string, start int, k int, path []rune, results *[]string, excludingCombos goset.Set) {
 	// If we have a full combination, add to results
 	if len(path) == k {
-		if !excludingCombos.Includes(string(path)) {
+		if !excludingCombos.Has(string(path)) {
 			*results = append(*results, string(path))
 		}
 		return
@@ -26,14 +36,14 @@ func combine(word string, start int, k int, path []rune, results *[]string, excl
 	}
 }
 
-func generateCombinations(input string, excludingCombos Set) []string {
-	input = strings.ToLower(input)
+func (config *SearchConfig) GenerateCombinations() []string {
+	input := strings.ToLower(config.TargetWord)
 	first := input[0]
 	rest := input[1:]
 	var results []string
 
 	for k := len(input); k >= 3; k-- {
-		combine(rest, 0, k, []rune{rune(first)}, &results, excludingCombos)
+		combine(rest, 0, k, []rune{rune(first)}, &results, config.ExcludingCombos)
 	}
 
 	return results
@@ -56,6 +66,9 @@ type SearchConfig struct {
 	RootAddress         string
 	TargetWord          string
 	WorkerLimit         uint16
+	OutputFile          string
+	WordByWordSearch    bool
+	ExcludingCombos     goset.Set
 }
 
 func getDefaultSearchConfig(root string, word string) SearchConfig {
@@ -66,27 +79,50 @@ func getDefaultSearchConfig(root string, word string) SearchConfig {
 		RootAddress:         root,
 		TargetWord:          word,
 		WorkerLimit:         200,
+		OutputFile:          "matches.txt",
+		WordByWordSearch:    false,
+		ExcludingCombos:     goset.New(),
 	}
 }
 
-type Set map[string]struct{}
-type SetItem struct{}
-
-func (s Set) Add(item string) bool {
-	if _, exists := s[item]; !exists {
-		s[item] = SetItem{}
-		return true
+func (config *SearchConfig) LoadExtraArgs() {
+	if argsCount := len(os.Args); argsCount > 3 {
+		for arg := 3; arg < argsCount; arg++ {
+			if limit, err := strconv.Atoi(os.Args[arg]); err == nil && limit > 0 {
+				config.WorkerLimit = uint16(limit)
+			} else if os.Args[arg] == "-w" {
+				log.Println("Word by word search enabled")
+				config.WordByWordSearch = true
+			} else if os.Args[arg] == "-x" {
+				for arg++; arg < argsCount && !strings.HasPrefix(os.Args[arg], "-") && !strings.HasPrefix(os.Args[arg], "+"); arg++ {
+					config.ExcludingCombos.Add(strings.ToLower(os.Args[arg]))
+				}
+				if config.ExcludingCombos.Count() == 0 {
+					log.Fatalln("No excluding combos specified: Usage: anyshape <directory> <word> [...] -x <combo1> <combo2> ... [...]")
+				}
+				arg--
+			} else if os.Args[arg] == "+fn" {
+				config.IncludeFilenames = true
+			} else if os.Args[arg] == "+ct" {
+				config.IncludeFileContents = true
+			} else if os.Args[arg] == "-fn" {
+				config.IncludeFilenames = false
+			} else if os.Args[arg] == "-ct" {
+				config.IncludeFileContents = false
+			} else if os.Args[arg] == "-o" {
+				if arg >= argsCount-1 {
+					log.Fatalln("No output file specified: Usage: anyshape <directory> <word> [...] -o <output_file> [...]")
+				}
+				config.OutputFile = os.Args[arg+1]
+				arg++
+			} else {
+				log.Fatalln("Unknown argument:", os.Args[arg])
+			}
+		}
 	}
-	return false
-}
-
-func (s Set) Includes(item string) bool {
-	_, exists := s[item]
-	return exists
-}
-
-func NewSet() Set {
-	return make(Set)
+	if !config.IncludeFilenames && !config.IncludeFileContents {
+		log.Fatalln("At least one of the following options must be enabled: +fn, +ct")
+	}
 }
 
 func search(rootAddress string, searchChannel chan SearchChannelData, writerChannel chan WriterChannelData) {
@@ -102,6 +138,7 @@ func search(rootAddress string, searchChannel chan SearchChannelData, writerChan
 
 			scanner := bufio.NewScanner(file)
 			lineNum := 1
+			comboLength := len(data.Combo)
 			for scanner.Scan() {
 				line := scanner.Text()
 				lowerLine := strings.ToLower(line)
@@ -112,9 +149,20 @@ func search(rootAddress string, searchChannel chan SearchChannelData, writerChan
 					if pos == -1 {
 						break
 					}
-					actual := lowerLine[idx+pos : idx+pos+len(data.Combo)]
+					start := idx + pos
+					if start > 0 && !separatorSigns.Has(rune(lowerLine[start])) {
+						for start > 0 && !separatorSigns.Has(rune(lowerLine[start-1])) {
+							start--
+						}
+					}
+
+					end := idx + pos + comboLength
+					for lineLength := len(lowerLine); end < lineLength && !separatorSigns.Has(rune(lowerLine[end])); {
+						end++
+					}
+					actual := lowerLine[start:end]
 					writerChannel <- WriterChannelData{
-						Output: fmt.Sprintf("%s | %s | line %d, char %d", actual, relPath, lineNum, idx+pos+1),
+						Output: fmt.Sprintf("%s | %s | %s | line %d, char %d", data.Combo, actual, relPath, lineNum, idx+pos+1),
 						Ident:  fmt.Sprintf("%s:%d:%d", relPath, lineNum, idx+pos+1),
 					}
 					idx += pos + 1
@@ -150,7 +198,7 @@ func searchWordByWord(rootAddress string, searchChannel chan SearchChannelData, 
 
 				for cursor, word := range strings.Fields(line) {
 					count := len(word)
-					if word[count-1] == '.' || word[count-1] == ',' || word[count-1] == ';' || word[count-1] == ':' {
+					if separatorSigns.Has(rune(word[count-1])) {
 						word = word[:count-1]
 					}
 					if strings.ToLower(word) == data.Combo {
@@ -210,14 +258,14 @@ func lookForMatches(config SearchConfig, searchChannel chan SearchChannelData, w
 	return failedCombos
 }
 
-func writeMatches(writerChannel chan WriterChannelData) {
-	matchesFile, err := os.OpenFile("anyshape-matches.txt", os.O_CREATE|os.O_WRONLY, 0644)
+func writeMatches(config SearchConfig, writerChannel chan WriterChannelData) {
+	matchesFile, err := os.OpenFile(config.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		log.Println("Error opening matches file:", err)
 		return
 	}
 	defer matchesFile.Close()
-	previousIdents := NewSet()
+	previousIdents := goset.New()
 	for match := range writerChannel {
 		if existed := !previousIdents.Add(match.Ident); !existed {
 			if _, err := matchesFile.WriteString(match.Output + "\n"); err != nil {
@@ -232,56 +280,26 @@ func main() {
 		log.Fatalln("Usage: anyshape <directory> <word>")
 	}
 
-	wordByWordSearch := false
-	excludingCombos := make(Set)
 	config := getDefaultSearchConfig(os.Args[1], os.Args[2])
+	config.LoadExtraArgs()
 
-	if argsCount := len(os.Args); argsCount > 3 {
-		for arg := 3; arg < argsCount; arg++ {
-			if limit, err := strconv.Atoi(os.Args[arg]); err == nil && limit > 0 {
-				config.WorkerLimit = uint16(limit)
-			} else if os.Args[arg] == "-w" {
-				log.Println("Word by word search enabled")
-				wordByWordSearch = true
-			} else if os.Args[arg] == "-x" {
-				for arg++; arg < argsCount && !strings.HasPrefix(os.Args[arg], "-") && !strings.HasPrefix(os.Args[arg], "+"); arg++ {
-					excludingCombos.Add(strings.ToLower(os.Args[arg]))
-				}
-				arg--
-			} else if os.Args[arg] == "+fn" {
-				fmt.Print("HERE")
-				config.IncludeFilenames = true
-			} else if os.Args[arg] == "+ct" {
-				config.IncludeFileContents = true
-			} else if os.Args[arg] == "-fn" {
-				config.IncludeFilenames = false
-			} else if os.Args[arg] == "-ct" {
-				config.IncludeFileContents = false
-			} else {
-				log.Fatalln("Unknown argument:", os.Args[arg])
-			}
-		}
-	}
-	if !config.IncludeFilenames && !config.IncludeFileContents {
-		log.Fatalln("At least one of the following options must be enabled: +fn, +ct")
-	}
 	writerChannel := make(chan WriterChannelData)
-	go writeMatches(writerChannel)
+	go writeMatches(config, writerChannel)
 
 	searchChannel := make(chan SearchChannelData, config.WorkerLimit)
 	searchChannelCapacity := uint16(cap(searchChannel))
 
 	if config.IncludeFileContents {
 		for i := uint16(0); i < searchChannelCapacity; i++ {
-			if wordByWordSearch { // the reason behind not combining these functions, is to prevent unnecessary search mode checks on each file and each combo again and again.
+			if config.WordByWordSearch { // the reason behind not combining these functions, is to prevent unnecessary search mode checks on each file and each combo again and again.
 				go searchWordByWord(config.RootAddress, searchChannel, writerChannel)
 			} else {
 				go search(config.RootAddress, searchChannel, writerChannel)
 			}
 		}
 	}
-	combinations := generateCombinations(config.TargetWord, excludingCombos)
-	if failedCombos := lookForMatches(config, searchChannel, writerChannel, combinations); len(failedCombos) > 0 {
+
+	if failedCombos := lookForMatches(config, searchChannel, writerChannel, config.GenerateCombinations()); len(failedCombos) > 0 {
 		writerChannel <- WriterChannelData{Output: fmt.Sprintln("\n- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - \nCombo's failed Matching:", len(failedCombos)), Ident: ""}
 		for _, combo := range failedCombos {
 			writerChannel <- WriterChannelData{Output: fmt.Sprintf("Failed to search for combo: %s", combo), Ident: ""}
