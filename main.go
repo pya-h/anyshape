@@ -10,16 +10,18 @@ import (
 	"strings"
 )
 
-func combine(word string, start int, k int, path []rune, results *[]string) {
+func combine(word string, start int, k int, path []rune, results *[]string, excludingCombos Set) {
 	// If we have a full combination, add to results
 	if len(path) == k {
-		*results = append(*results, string(path))
+		if !excludingCombos.Includes(string(path)) {
+			*results = append(*results, string(path))
+		}
 		return
 	}
 
 	for i := start; i < len(word); i++ {
 		path = append(path, rune(word[i]))
-		combine(word, i+1, k, path, results)
+		combine(word, i+1, k, path, results, excludingCombos)
 		path = path[:len(path)-1]
 	}
 }
@@ -31,7 +33,7 @@ func generateCombinations(input string, excludingCombos Set) []string {
 	var results []string
 
 	for k := len(input); k >= 3; k-- {
-		combine(rest, 0, k, []rune{rune(first)}, &results)
+		combine(rest, 0, k, []rune{rune(first)}, &results, excludingCombos)
 	}
 
 	return results
