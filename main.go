@@ -49,6 +49,26 @@ type WriterChannelData struct {
 	Ident  string
 }
 
+type SearchConfig struct {
+	CaseSensitive       bool
+	IncludeFilenames    bool
+	IncludeFileContents bool
+	RootAddress         string
+	TargetWord          string
+	WorkerLimit         uint16
+}
+
+func getDefaultSearchConfig(root string, word string) SearchConfig {
+	return SearchConfig{
+		CaseSensitive:       false,
+		IncludeFilenames:    false,
+		IncludeFileContents: true,
+		RootAddress:         root,
+		TargetWord:          word,
+		WorkerLimit:         200,
+	}
+}
+
 type Set map[string]struct{}
 type SetItem struct{}
 
@@ -150,18 +170,38 @@ func searchWordByWord(rootAddress string, searchChannel chan SearchChannelData, 
 	}
 }
 
-func lookForMatches(rootAddress string, searchChannel chan SearchChannelData, combos []string) []string {
+func lookForMatches(config SearchConfig, searchChannel chan SearchChannelData, writerChannel chan WriterChannelData, combos []string) []string {
 	failedCombos := make([]string, 0)
 	for _, combo := range combos {
 		log.Println("Searching for combo:", combo, "...")
-		if err := filepath.Walk(rootAddress, func(path string, info os.FileInfo, err error) error {
+		if err := filepath.Walk(config.RootAddress, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return nil
+			}
+			if config.IncludeFilenames {
+				if strings.Contains(strings.ToLower(info.Name()), combo) {
+					relativePath, err := filepath.Rel(config.RootAddress, path)
+					if err != nil {
+						relativePath = path
+					}
+					entityType := "File"
+					ident := relativePath
+					if info.IsDir() {
+						ident += "#D"
+						entityType = "Directory"
+					} else {
+						ident += "#F"
+					}
+					writerChannel <- WriterChannelData{Output: fmt.Sprintf("%s | %s | %s", combo, relativePath, entityType), Ident: ident}
+				}
 			}
 			if info.IsDir() {
 				return nil
 			}
-			searchChannel <- SearchChannelData{Path: path, Combo: combo}
+			if config.IncludeFileContents {
+				// TODO: Add case sensitive search logic too
+				searchChannel <- SearchChannelData{Path: path, Combo: combo}
+			}
 			return nil
 		}); err != nil {
 			failedCombos = append(failedCombos, combo)
@@ -191,42 +231,57 @@ func main() {
 	if len(os.Args) < 3 {
 		log.Fatalln("Usage: anyshape <directory> <word>")
 	}
-	root := os.Args[1]
-	word := os.Args[2]
-	workerLimit := 300
+
 	wordByWordSearch := false
 	excludingCombos := make(Set)
+	config := getDefaultSearchConfig(os.Args[1], os.Args[2])
+
 	if argsCount := len(os.Args); argsCount > 3 {
 		for arg := 3; arg < argsCount; arg++ {
 			if limit, err := strconv.Atoi(os.Args[arg]); err == nil && limit > 0 {
-				workerLimit = limit
+				config.WorkerLimit = uint16(limit)
 			} else if os.Args[arg] == "-w" {
 				log.Println("Word by word search enabled")
 				wordByWordSearch = true
 			} else if os.Args[arg] == "-x" {
-				for arg++; arg < argsCount && !strings.HasPrefix(os.Args[arg], "-"); arg++ {
+				for arg++; arg < argsCount && !strings.HasPrefix(os.Args[arg], "-") && !strings.HasPrefix(os.Args[arg], "+"); arg++ {
 					excludingCombos.Add(strings.ToLower(os.Args[arg]))
 				}
+				arg--
+			} else if os.Args[arg] == "+fn" {
+				fmt.Print("HERE")
+				config.IncludeFilenames = true
+			} else if os.Args[arg] == "+ct" {
+				config.IncludeFileContents = true
+			} else if os.Args[arg] == "-fn" {
+				config.IncludeFilenames = false
+			} else if os.Args[arg] == "-ct" {
+				config.IncludeFileContents = false
 			} else {
 				log.Fatalln("Unknown argument:", os.Args[arg])
 			}
 		}
 	}
+	if !config.IncludeFilenames && !config.IncludeFileContents {
+		log.Fatalln("At least one of the following options must be enabled: +fn, +ct")
+	}
 	writerChannel := make(chan WriterChannelData)
 	go writeMatches(writerChannel)
 
-	searchChannel := make(chan SearchChannelData, workerLimit)
+	searchChannel := make(chan SearchChannelData, config.WorkerLimit)
 	searchChannelCapacity := uint16(cap(searchChannel))
 
-	for i := uint16(0); i < searchChannelCapacity; i++ {
-		if wordByWordSearch { // the reason behind not combining these functions, is to prevent unnecessary search mode checks on each file and each combo again and again.
-			go searchWordByWord(root, searchChannel, writerChannel)
-		} else {
-			go search(root, searchChannel, writerChannel)
+	if config.IncludeFileContents {
+		for i := uint16(0); i < searchChannelCapacity; i++ {
+			if wordByWordSearch { // the reason behind not combining these functions, is to prevent unnecessary search mode checks on each file and each combo again and again.
+				go searchWordByWord(config.RootAddress, searchChannel, writerChannel)
+			} else {
+				go search(config.RootAddress, searchChannel, writerChannel)
+			}
 		}
 	}
-	combinations := generateCombinations(word, excludingCombos)
-	if failedCombos := lookForMatches(root, searchChannel, combinations); len(failedCombos) > 0 {
+	combinations := generateCombinations(config.TargetWord, excludingCombos)
+	if failedCombos := lookForMatches(config, searchChannel, writerChannel, combinations); len(failedCombos) > 0 {
 		writerChannel <- WriterChannelData{Output: fmt.Sprintln("\n- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - \nCombo's failed Matching:", len(failedCombos)), Ident: ""}
 		for _, combo := range failedCombos {
 			writerChannel <- WriterChannelData{Output: fmt.Sprintf("Failed to search for combo: %s", combo), Ident: ""}

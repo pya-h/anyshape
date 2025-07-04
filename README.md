@@ -9,10 +9,12 @@
 - ✅ **Search any shape of a word**: intelligently generates combinations of the target word
 - ⚡ **Concurrent processing**: fast file scanning using worker goroutines
 - 📂 **Recursive directory scanning**
-- 🔍 **Case-insensitive matching**
+- 🔍 **Case-insensitive matching** (soon)
 - 📄 **Line-level and character-level match reporting**
 - 🛑 **Optional exclusions for specific combinations**
 - 💡 **Customizable worker count**
+- 🔍 **Customizable Search engine, allowing to search only file/folder names, only contents or both**
+- ✅ **Organized results without repetitive matches on the same positions of the same file**
 
 ---
 
@@ -46,7 +48,7 @@ go build -o anyshape
 ## 🔧 Usage
 
 ```bash
-anyshape <address> <targetWord> [workers] [-w] [-x <exclude1> <exclude2> ...]
+anyshape <address> <targetWord> [workers] [-w] [-x <exclude1> <exclude2> ...] [+fn/-fn] [+ct/-ct]
 ```
 
 ### Required:
@@ -60,6 +62,8 @@ anyshape <address> <targetWord> [workers] [-w] [-x <exclude1> <exclude2> ...]
 * `-w`: If passed, the search would be limited to word by word search; e.g. combinations like 'tes' does not match a word like 'Test'.
     It's obvious that this kind of search is faster, but the default search mode finds any type of occurrence.
 * `-x`: Followed by a list of combinations that you don't want to search for.
+* `+fn/-fn`: Enabling/Disabling file/folder name search [default: disabled]
+* `+ct/-ct`: Enabling/Disabling file content search [default: enabled]
 
 📌 **Order of flags is arbitrary** — you can place them in any position.
 
