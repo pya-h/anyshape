@@ -164,7 +164,7 @@ func lookForMatches(rootAddress string, word string, searchChannel chan SearchCh
 }
 
 func writeMatches(writerChannel chan WriterChannelData) {
-	matchesFile, err := os.OpenFile("../anyshape-matches.txt", os.O_CREATE|os.O_WRONLY, 0644)
+	matchesFile, err := os.OpenFile("anyshape-matches.txt", os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Println("Error opening matches file:", err)
 		return
