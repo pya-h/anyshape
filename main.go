@@ -42,13 +42,33 @@ type SearchChannelData struct {
 	Combo string
 }
 
-func search(rootAddress string, searchChannel chan SearchChannelData, writerChannel chan string) {
+type WriterChannelData struct {
+	Output string
+	Ident  string
+}
+
+type Set map[string]struct{}
+type SetItem struct{}
+
+func (s Set) Add(item string) bool {
+	if _, exists := s[item]; !exists {
+		s[item] = SetItem{}
+		return true
+	}
+	return false
+}
+
+func NewSet() Set {
+	return make(Set)
+}
+
+func search(rootAddress string, searchChannel chan SearchChannelData, writerChannel chan WriterChannelData) {
 	for data := range searchChannel {
 		relPath, _ := filepath.Rel(rootAddress, data.Path)
 		go func() {
 			file, err := os.Open(data.Path)
 			if err != nil {
-				writerChannel <- fmt.Sprintf("Error reading file %s to match:%s : %v", relPath, data.Combo, err)
+				writerChannel <- WriterChannelData{Output: fmt.Sprintf("Error reading file %s to match:%s : %v", relPath, data.Combo, err), Ident: ""}
 				return
 			}
 			defer file.Close()
@@ -66,8 +86,10 @@ func search(rootAddress string, searchChannel chan SearchChannelData, writerChan
 						break
 					}
 					actual := line[idx+pos : idx+pos+len(data.Combo)]
-					output := fmt.Sprintf("%s | %s | line %d, char %d", actual, relPath, lineNum, idx+pos+1)
-					writerChannel <- output
+					writerChannel <- WriterChannelData{
+						Output: fmt.Sprintf("%s | %s | line %d, char %d", actual, relPath, lineNum, idx+pos+1),
+						Ident:  fmt.Sprintf("%s:%d:%d", relPath, lineNum, idx+pos+1),
+					}
 					idx += pos + 1
 					if idx >= len(line) {
 						break
@@ -77,19 +99,19 @@ func search(rootAddress string, searchChannel chan SearchChannelData, writerChan
 			}
 
 			if err := scanner.Err(); err != nil {
-				writerChannel <- fmt.Sprintf("Error reading file %s to match:%s : %v", data.Path, data.Combo, err)
+				writerChannel <- WriterChannelData{Output: fmt.Sprintf("Error reading file %s to match:%s : %v", data.Path, data.Combo, err), Ident: ""}
 			}
 		}()
 	}
 }
 
-func searchWordByWord(rootAddress string, searchChannel chan SearchChannelData, writerChannel chan string) {
+func searchWordByWord(rootAddress string, searchChannel chan SearchChannelData, writerChannel chan WriterChannelData) {
 	for data := range searchChannel {
 		relPath, _ := filepath.Rel(rootAddress, data.Path)
 		go func() {
 			file, err := os.Open(data.Path)
 			if err != nil {
-				writerChannel <- fmt.Sprintf("Error reading file %s to match:%s : %v", relPath, data.Combo, err)
+				writerChannel <- WriterChannelData{Output: fmt.Sprintf("Error reading file %s to match:%s : %v", relPath, data.Combo, err), Ident: ""}
 				return
 			}
 			defer file.Close()
@@ -105,14 +127,17 @@ func searchWordByWord(rootAddress string, searchChannel chan SearchChannelData, 
 						word = word[:count-1]
 					}
 					if strings.ToLower(word) == data.Combo {
-						writerChannel <- fmt.Sprintf("%s | %s | line %d, word %d", word, relPath, lineNum, cursor+1)
+						writerChannel <- WriterChannelData{
+							Output: fmt.Sprintf("%s | %s | line %d, word %d", word, relPath, lineNum, cursor+1),
+							Ident:  fmt.Sprintf("%s:%d:%d", relPath, lineNum, cursor+1),
+						}
 					}
 				}
 				lineNum++
 			}
 
 			if err := scanner.Err(); err != nil {
-				writerChannel <- fmt.Sprintf("Error reading file %s to match:%s : %v", data.Path, data.Combo, err)
+				writerChannel <- WriterChannelData{Output: fmt.Sprintf("Error reading file %s to match:%s : %v", data.Path, data.Combo, err), Ident: ""}
 			}
 		}()
 	}
@@ -138,17 +163,19 @@ func lookForMatches(rootAddress string, word string, searchChannel chan SearchCh
 	return failedCombos
 }
 
-func writeMatches(writerChannel chan string) {
+func writeMatches(writerChannel chan WriterChannelData) {
 	matchesFile, err := os.OpenFile("../anyshape-matches.txt", os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Println("Error opening matches file:", err)
 		return
 	}
 	defer matchesFile.Close()
-
+	previousIdents := NewSet()
 	for match := range writerChannel {
-		if _, err := matchesFile.WriteString(match + "\n"); err != nil {
-			log.Println("Saving match:", match, "failed:", err)
+		if existed := !previousIdents.Add(match.Ident); !existed {
+			if _, err := matchesFile.WriteString(match.Output + "\n"); err != nil {
+				log.Println("Saving match:", match, "failed:", err)
+			}
 		}
 	}
 }
@@ -174,7 +201,7 @@ func main() {
 			}
 		}
 	}
-	writerChannel := make(chan string)
+	writerChannel := make(chan WriterChannelData)
 	go writeMatches(writerChannel)
 
 	searchChannel := make(chan SearchChannelData, workerLimit)
@@ -190,9 +217,9 @@ func main() {
 
 	if failedCombos := lookForMatches(root, word, searchChannel); len(failedCombos) > 0 {
 
-		writerChannel <- fmt.Sprintln("\n- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - \nCombo's failed Matching:", len(failedCombos))
+		writerChannel <- WriterChannelData{Output: fmt.Sprintln("\n- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - \nCombo's failed Matching:", len(failedCombos)), Ident: ""}
 		for _, combo := range failedCombos {
-			writerChannel <- fmt.Sprintf("Failed to search for combo: %s", combo)
+			writerChannel <- WriterChannelData{Output: fmt.Sprintf("Failed to search for combo: %s", combo), Ident: ""}
 		}
 	}
 }
