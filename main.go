@@ -85,7 +85,7 @@ func search(rootAddress string, searchChannel chan SearchChannelData, writerChan
 					if pos == -1 {
 						break
 					}
-					actual := line[idx+pos : idx+pos+len(data.Combo)]
+					actual := lowerLine[idx+pos : idx+pos+len(data.Combo)]
 					writerChannel <- WriterChannelData{
 						Output: fmt.Sprintf("%s | %s | line %d, char %d", actual, relPath, lineNum, idx+pos+1),
 						Ident:  fmt.Sprintf("%s:%d:%d", relPath, lineNum, idx+pos+1),
