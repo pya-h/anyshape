@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	goset "github.com/pydea-rs/goset"
 )
@@ -125,12 +127,13 @@ func (config *SearchConfig) LoadExtraArgs() {
 	}
 }
 
-func search(rootAddress string, searchChannel chan SearchChannelData, writerChannel chan WriterChannelData) {
+func search(rootAddress string, searchChannel chan SearchChannelData, writerChannel chan WriterChannelData, waiter *sync.WaitGroup) {
 	for data := range searchChannel {
 		relPath, _ := filepath.Rel(rootAddress, data.Path)
 		go func() {
 			file, err := os.Open(data.Path)
 			if err != nil {
+				waiter.Add(1)
 				writerChannel <- WriterChannelData{Output: fmt.Sprintf("Error reading file %s to match:%s : %v", relPath, data.Combo, err), Ident: ""}
 				return
 			}
@@ -161,6 +164,7 @@ func search(rootAddress string, searchChannel chan SearchChannelData, writerChan
 						end++
 					}
 					actual := lowerLine[start:end]
+					waiter.Add(1)
 					writerChannel <- WriterChannelData{
 						Output: fmt.Sprintf("%s | %s | %s | line %d, char %d", data.Combo, actual, relPath, lineNum, idx+pos+1),
 						Ident:  fmt.Sprintf("%s:%d:%d", relPath, lineNum, idx+pos+1),
@@ -172,20 +176,22 @@ func search(rootAddress string, searchChannel chan SearchChannelData, writerChan
 				}
 				lineNum++
 			}
-
+			waiter.Done()
 			if err := scanner.Err(); err != nil {
+				waiter.Add(1)
 				writerChannel <- WriterChannelData{Output: fmt.Sprintf("Error reading file %s to match:%s : %v", data.Path, data.Combo, err), Ident: ""}
 			}
 		}()
 	}
 }
 
-func searchWordByWord(rootAddress string, searchChannel chan SearchChannelData, writerChannel chan WriterChannelData) {
+func searchWordByWord(rootAddress string, searchChannel chan SearchChannelData, writerChannel chan WriterChannelData, waiter *sync.WaitGroup) {
 	for data := range searchChannel {
 		relPath, _ := filepath.Rel(rootAddress, data.Path)
 		go func() {
 			file, err := os.Open(data.Path)
 			if err != nil {
+				waiter.Add(1)
 				writerChannel <- WriterChannelData{Output: fmt.Sprintf("Error reading file %s to match:%s : %v", relPath, data.Combo, err), Ident: ""}
 				return
 			}
@@ -202,6 +208,7 @@ func searchWordByWord(rootAddress string, searchChannel chan SearchChannelData, 
 						word = word[:count-1]
 					}
 					if strings.ToLower(word) == data.Combo {
+						waiter.Add(1)
 						writerChannel <- WriterChannelData{
 							Output: fmt.Sprintf("%s | %s | line %d, word %d", word, relPath, lineNum, cursor+1),
 							Ident:  fmt.Sprintf("%s:%d:%d", relPath, lineNum, cursor+1),
@@ -210,17 +217,20 @@ func searchWordByWord(rootAddress string, searchChannel chan SearchChannelData, 
 				}
 				lineNum++
 			}
-
+			waiter.Done()
 			if err := scanner.Err(); err != nil {
+				waiter.Add(1)
 				writerChannel <- WriterChannelData{Output: fmt.Sprintf("Error reading file %s to match:%s : %v", data.Path, data.Combo, err), Ident: ""}
 			}
 		}()
 	}
 }
 
-func lookForMatches(config SearchConfig, searchChannel chan SearchChannelData, writerChannel chan WriterChannelData, combos []string) []string {
+func lookForMatches(config SearchConfig, searchChannel chan SearchChannelData,
+	writerChannel chan WriterChannelData, waiter *sync.WaitGroup) []string {
 	failedCombos := make([]string, 0)
-	for _, combo := range combos {
+
+	for _, combo := range config.GenerateCombinations() {
 		log.Println("Searching for combo:", combo, "...")
 		if err := filepath.Walk(config.RootAddress, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -240,6 +250,7 @@ func lookForMatches(config SearchConfig, searchChannel chan SearchChannelData, w
 					} else {
 						ident += "#F"
 					}
+					waiter.Add(1)
 					writerChannel <- WriterChannelData{Output: fmt.Sprintf("%s | %s | %s", combo, relativePath, entityType), Ident: ident}
 				}
 			}
@@ -248,6 +259,7 @@ func lookForMatches(config SearchConfig, searchChannel chan SearchChannelData, w
 			}
 			if config.IncludeFileContents {
 				// TODO: Add case sensitive search logic too
+				waiter.Add(1)
 				searchChannel <- SearchChannelData{Path: path, Combo: combo}
 			}
 			return nil
@@ -255,10 +267,11 @@ func lookForMatches(config SearchConfig, searchChannel chan SearchChannelData, w
 			failedCombos = append(failedCombos, combo)
 		}
 	}
+	waiter.Wait()
 	return failedCombos
 }
 
-func writeMatches(config SearchConfig, writerChannel chan WriterChannelData) {
+func writeMatches(config SearchConfig, writerChannel chan WriterChannelData, waiter *sync.WaitGroup) {
 	matchesFile, err := os.OpenFile(config.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		log.Println("Error opening matches file:", err)
@@ -272,6 +285,7 @@ func writeMatches(config SearchConfig, writerChannel chan WriterChannelData) {
 				log.Println("Saving match:", match, "failed:", err)
 			}
 		}
+		waiter.Done()
 	}
 }
 
@@ -279,12 +293,13 @@ func main() {
 	if len(os.Args) < 3 {
 		log.Fatalln("Usage: anyshape <directory> <word>")
 	}
-
+	start := time.Now()
 	config := getDefaultSearchConfig(os.Args[1], os.Args[2])
 	config.LoadExtraArgs()
 
 	writerChannel := make(chan WriterChannelData)
-	go writeMatches(config, writerChannel)
+	waiter := new(sync.WaitGroup)
+	go writeMatches(config, writerChannel, waiter)
 
 	searchChannel := make(chan SearchChannelData, config.WorkerLimit)
 	searchChannelCapacity := uint16(cap(searchChannel))
@@ -292,17 +307,25 @@ func main() {
 	if config.IncludeFileContents {
 		for i := uint16(0); i < searchChannelCapacity; i++ {
 			if config.WordByWordSearch { // the reason behind not combining these functions, is to prevent unnecessary search mode checks on each file and each combo again and again.
-				go searchWordByWord(config.RootAddress, searchChannel, writerChannel)
+				go searchWordByWord(config.RootAddress, searchChannel, writerChannel, waiter)
 			} else {
-				go search(config.RootAddress, searchChannel, writerChannel)
+				go search(config.RootAddress, searchChannel, writerChannel, waiter)
 			}
 		}
 	}
 
-	if failedCombos := lookForMatches(config, searchChannel, writerChannel, config.GenerateCombinations()); len(failedCombos) > 0 {
-		writerChannel <- WriterChannelData{Output: fmt.Sprintln("\n- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - \nCombo's failed Matching:", len(failedCombos)), Ident: ""}
+	if failedCombos := lookForMatches(config, searchChannel, writerChannel, waiter); len(failedCombos) > 0 {
+		waiter.Add(1)
+		writerChannel <- WriterChannelData{
+			Output: fmt.Sprintln("\n- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - \nCombo's failed Matching:", len(failedCombos)),
+			Ident:  "",
+		}
 		for _, combo := range failedCombos {
+			waiter.Add(1)
 			writerChannel <- WriterChannelData{Output: fmt.Sprintf("Failed to search for combo: %s", combo), Ident: ""}
 		}
 	}
+	close(writerChannel)
+	close(searchChannel)
+	log.Println("Search Time:", time.Since(start).String())
 }
