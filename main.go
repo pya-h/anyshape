@@ -71,6 +71,8 @@ type SearchConfig struct {
 	OutputFile          string
 	WordByWordSearch    bool
 	ExcludingCombos     goset.Set
+	SkipPrefixes        goset.Set
+	SkipErrors          bool
 }
 
 func getDefaultSearchConfig(root string, word string) SearchConfig {
@@ -84,6 +86,8 @@ func getDefaultSearchConfig(root string, word string) SearchConfig {
 		OutputFile:          "matches.txt",
 		WordByWordSearch:    false,
 		ExcludingCombos:     goset.New(),
+		SkipPrefixes:        goset.New(),
+		SkipErrors:          false,
 	}
 }
 
@@ -93,13 +97,12 @@ func (config *SearchConfig) LoadExtraArgs() {
 			if limit, err := strconv.Atoi(os.Args[arg]); err == nil && limit > 0 {
 				config.WorkerLimit = uint16(limit)
 			} else if os.Args[arg] == "-w" {
-				log.Println("Word by word search enabled")
 				config.WordByWordSearch = true
 			} else if os.Args[arg] == "-x" {
 				for arg++; arg < argsCount && !strings.HasPrefix(os.Args[arg], "-") && !strings.HasPrefix(os.Args[arg], "+"); arg++ {
 					config.ExcludingCombos.Add(strings.ToLower(os.Args[arg]))
 				}
-				if config.ExcludingCombos.Count() == 0 {
+				if config.ExcludingCombos.Empty() && !config.SkipErrors {
 					log.Fatalln("No excluding combos specified: Usage: anyshape <directory> <word> [...] -x <combo1> <combo2> ... [...]")
 				}
 				arg--
@@ -111,25 +114,57 @@ func (config *SearchConfig) LoadExtraArgs() {
 				config.IncludeFilenames = false
 			} else if os.Args[arg] == "-ct" {
 				config.IncludeFileContents = false
+			} else if os.Args[arg] == "-!" {
+				config.SkipErrors = true
 			} else if os.Args[arg] == "-o" {
 				if arg >= argsCount-1 {
+					if config.SkipErrors {
+						continue
+					}
 					log.Fatalln("No output file specified: Usage: anyshape <directory> <word> [...] -o <output_file> [...]")
 				}
 				config.OutputFile = os.Args[arg+1]
 				arg++
+			} else if os.Args[arg] == "-px" {
+				for arg++; arg < argsCount && !strings.HasPrefix(os.Args[arg], "-") && !strings.HasPrefix(os.Args[arg], "+"); arg++ {
+					if len(os.Args[arg]) > 1 {
+						if config.SkipErrors {
+							continue
+						}
+						log.Fatalf("Invalid skipping prefix: '%s';For now -due to performance reasons- only one character prefixes are supported.\n", os.Args[arg])
+					}
+					config.SkipPrefixes.Add(rune(strings.ToLower(os.Args[arg])[0]))
+				}
+				if config.SkipPrefixes.Empty() && !config.SkipErrors {
+					log.Fatalln("No skip-prefix character specified: Usage: anyshape <directory> <word> [...] -px <skippingPrefix1> <skippingPrefix2> ... [...]")
+				}
+				arg--
 			} else {
 				log.Fatalln("Unknown argument:", os.Args[arg])
 			}
 		}
 	}
 	if !config.IncludeFilenames && !config.IncludeFileContents {
-		log.Fatalln("At least one of the following options must be enabled: +fn, +ct")
+		if !config.SkipErrors {
+			log.Fatalln("At least one of the following options must be enabled: +fn, +ct")
+		} else {
+			config.IncludeFileContents = true
+			log.Println("Neither +fn nor +ct is enabled; enabling +ct by default.")
+		}
+	}
+	if config.WordByWordSearch && !config.SkipPrefixes.Empty() {
+		if !config.SkipErrors {
+			log.Fatalln("Skip prefixes are meaningless in word by word search mode!")
+		} else {
+			config.SkipPrefixes.Clear()
+			log.Println("Skip prefixes are meaningless in word by word search mode! Disabling skip prefixes.")
+		}
 	}
 }
 
-func search(rootAddress string, searchChannel chan SearchChannelData, writerChannel chan WriterChannelData, waiter *sync.WaitGroup) {
+func (config *SearchConfig) Search(searchChannel chan SearchChannelData, writerChannel chan WriterChannelData, waiter *sync.WaitGroup) {
 	for data := range searchChannel {
-		relPath, _ := filepath.Rel(rootAddress, data.Path)
+		relPath, _ := filepath.Rel(config.RootAddress, data.Path)
 		go func() {
 			file, err := os.Open(data.Path)
 			if err != nil {
@@ -153,6 +188,9 @@ func search(rootAddress string, searchChannel chan SearchChannelData, writerChan
 						break
 					}
 					start := idx + pos
+					if start > 0 && !config.SkipPrefixes.Empty() && config.SkipPrefixes.Has(rune(lowerLine[start-1])) {
+						break
+					}
 					if start > 0 && !separatorSigns.Has(rune(lowerLine[start])) {
 						for start > 0 && !separatorSigns.Has(rune(lowerLine[start-1])) {
 							start--
@@ -185,9 +223,9 @@ func search(rootAddress string, searchChannel chan SearchChannelData, writerChan
 	}
 }
 
-func searchWordByWord(rootAddress string, searchChannel chan SearchChannelData, writerChannel chan WriterChannelData, waiter *sync.WaitGroup) {
+func (config *SearchConfig) SearchWordByWord(searchChannel chan SearchChannelData, writerChannel chan WriterChannelData, waiter *sync.WaitGroup) {
 	for data := range searchChannel {
-		relPath, _ := filepath.Rel(rootAddress, data.Path)
+		relPath, _ := filepath.Rel(config.RootAddress, data.Path)
 		go func() {
 			file, err := os.Open(data.Path)
 			if err != nil {
@@ -307,9 +345,9 @@ func main() {
 	if config.IncludeFileContents {
 		for i := uint16(0); i < searchChannelCapacity; i++ {
 			if config.WordByWordSearch { // the reason behind not combining these functions, is to prevent unnecessary search mode checks on each file and each combo again and again.
-				go searchWordByWord(config.RootAddress, searchChannel, writerChannel, waiter)
+				go config.SearchWordByWord(searchChannel, writerChannel, waiter)
 			} else {
-				go search(config.RootAddress, searchChannel, writerChannel, waiter)
+				go config.Search(searchChannel, writerChannel, waiter)
 			}
 		}
 	}

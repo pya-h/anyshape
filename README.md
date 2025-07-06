@@ -48,7 +48,7 @@ go build -o anyshape
 ## 🔧 Usage
 
 ```bash
-anyshape <address> <targetWord> [workers] [-w] [-x <exclude1> <exclude2> ...] [+fn/-fn] [+ct/-ct]
+anyshape <address> <targetWord> [-!] [workers] [-w] [-x <exclude1> <exclude2> ...] [+fn/-fn] [+ct/-ct] [-px <prefix1> <prefix2> ...] [-o <path>]
 ```
 
 ### Required:
@@ -58,12 +58,15 @@ anyshape <address> <targetWord> [workers] [-w] [-x <exclude1> <exclude2> ...] [+
 
 ### Optional:
 
+* `-!`: Auto Revise/Skip search config errors. Some configs can not be set together to avoid conflicts; Settings this flag will skip those errors or revise them; Revisions will be informed at start. This param must be the first one to work correctly.
 * `workers`: Number of concurrent file-reading workers (defaults to logical CPU cores)
 * `-w`: If passed, the search would be limited to word by word search; e.g. combinations like 'tes' does not match a word like 'Test'.
     It's obvious that this kind of search is faster, but the default search mode finds any type of occurrence.
 * `-x`: Followed by a list of combinations that you don't want to search for.
 * `+fn/-fn`: Enabling/Disabling file/folder name search [default: disabled]
 * `+ct/-ct`: Enabling/Disabling file content search [default: enabled]
+* `-px`: Followed by a list of single character [for now] prefixes which you want to be skipped in the result. e.g. if @TEST is a match and '@' was in skipping prefix list, then the word would be skipped/unmatched.
+* `-o`: Followed by a valid path, will specify the result's filename/path.
 
 📌 **Order of flags is arbitrary** — you can place them in any position.
 
